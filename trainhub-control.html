@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TrainHub BLE Control</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 480px; margin: 20px auto; padding: 0 16px; background:#111; color:#eee; }
+  h1 { font-size: 20px; }
+  button { font-size: 18px; padding: 14px; margin: 6px 0; width: 100%; border-radius: 10px; border: none; }
+  #connectBtn { background:#2b6cb0; color:#fff; }
+  .motor { background:#2f855a; color:#fff; }
+  .stop { background:#c53030; color:#fff; }
+  .led { color:#fff; }
+  #log { background:#000; color:#0f0; font-family: monospace; font-size: 12px; padding: 10px; height: 180px; overflow-y:auto; white-space: pre-wrap; border-radius: 8px; margin-top: 16px; }
+  #status { font-weight: bold; margin: 10px 0; }
+  .row { display:flex; gap:8px; }
+  .row button { flex:1; }
+</style>
+</head>
+<body>
+
+<h1>TrainHub BLE Control</h1>
+<div id="status">Not connected</div>
+<button id="connectBtn">Connect to TrainHub</button>
+
+<h3>Port A Motor</h3>
+<div class="row">
+  <button class="motor" onclick="motor('A', 50)">Forward</button>
+  <button class="stop" onclick="motor('A', 0)">Stop</button>
+  <button class="motor" onclick="motor('A', -50)">Reverse</button>
+</div>
+
+<h3>Port B Motor</h3>
+<div class="row">
+  <button class="motor" onclick="motor('B', 50)">Forward</button>
+  <button class="stop" onclick="motor('B', 0)">Stop</button>
+  <button class="motor" onclick="motor('B', -50)">Reverse</button>
+</div>
+
+<h3>Hub LED</h3>
+<div class="row">
+  <button class="led" style="background:#e53e3e" onclick="led(9)">Red</button>
+  <button class="led" style="background:#3182ce" onclick="led(3)">Blue</button>
+  <button class="led" style="background:#38a169" onclick="led(6)">Green</button>
+  <button class="led" style="background:#333" onclick="led(0)">Off</button>
+</div>
+
+<div id="log"></div>
+
+<script>
+// LEGO Wireless Protocol UUIDs — same ones your ESP32 already advertises
+const SERVICE_UUID = "00001623-1212-efde-1623-785feabcd123";
+const CHAR_UUID     = "00001624-1212-efde-1623-785feabcd123";
+
+// Port letter -> port number byte, matching PoweredUpHubPort in your .ino
+const PORTS = { A: 0x00, B: 0x01, LED: 0x32 };
+
+let device, characteristic;
+
+function log(msg) {
+  const el = document.getElementById('log');
+  const t = new Date().toLocaleTimeString();
+  el.textContent += `[${t}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function setStatus(s) {
+  document.getElementById('status').textContent = s;
+}
+
+// Map -100..100 to Legoino's internal 8-bit speed encoding (mirrors LegoinoCommon::MapSpeed)
+function mapSpeed(speed) {
+  if (speed === 0) return 127; // stop
+  if (speed > 0) return Math.round((speed / 100) * 126);
+  return Math.round(255 - ((-speed / 100) * 127));
+}
+
+async function connect() {
+  try {
+    setStatus("Requesting device...");
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }]
+    });
+    log(`Selected device: ${device.name}`);
+
+    device.addEventListener('gattserverdisconnected', () => {
+      setStatus("Disconnected");
+      log("Device disconnected");
+    });
+
+    setStatus("Connecting...");
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    characteristic = await service.getCharacteristic(CHAR_UUID);
+
+    await characteristic.startNotifications();
+    characteristic.addEventListener('characteristicvaluechanged', (event) => {
+      const bytes = new Uint8Array(event.target.value.buffer);
+      log(`RX: ${[...bytes].map(b => b.toString(16).padStart(2,'0')).join(' ')}`);
+    });
+
+    setStatus(`Connected to ${device.name}`);
+    log("Connected and subscribed to notifications");
+  } catch (err) {
+    setStatus("Connection failed");
+    log(`Error: ${err}`);
+  }
+}
+
+// Port Output Command (0x81), WriteDirectModeData (0x51), Mode 0, single-byte value
+async function sendPortOutput(port, valueByte) {
+  if (!characteristic) { log("Not connected yet"); return; }
+  const payload = new Uint8Array([
+    0x08,        // length
+    0x00,        // hub id
+    0x81,        // message type: PORT_OUTPUT_COMMAND
+    port,        // port id
+    0x11,        // startup/completion info
+    0x51,        // sub-command: WRITE_DIRECT_MODE_DATA
+    0x00,        // mode
+    valueByte    // value
+  ]);
+  try {
+    await characteristic.writeValueWithoutResponse(payload);
+    log(`TX: ${[...payload].map(b => b.toString(16).padStart(2,'0')).join(' ')}`);
+  } catch (err) {
+    log(`Write failed: ${err}`);
+  }
+}
+
+function motor(portLetter, speed) {
+  const speedByte = mapSpeed(speed);
+  sendPortOutput(PORTS[portLetter], speedByte);
+}
+
+function led(colorIndex) {
+  sendPortOutput(PORTS.LED, colorIndex);
+}
+
+document.getElementById('connectBtn').addEventListener('click', connect);
+</script>
+
+</body>
+</html>
